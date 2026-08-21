@@ -1,0 +1,744 @@
+openapi: 3.0.3
+
+info:
+  title: Team-2 — Volunteer Feedback API
+  version: 0.5.0
+  description: |
+    Volunteer Feedback Collection & Experience Tracking System — volunteer-facing feedback API.
+
+    ## Status legend
+
+    Every path, schema and property below is tagged in its description with one of:
+
+    * **CONFIRMED** — implemented in the repository and verified end-to-end (Phase 2 auth stack).
+    * **PROPOSED** — Dev 2's design, frontend-ready, awaiting team sign-off. Safe to build against;
+      the outer contract (URLs, envelope, status codes) is intended to stay stable.
+    * **OPEN** — genuinely unresolved. Not implemented, and must not be assumed.
+
+    ## Scope
+
+    The volunteer feedback endpoints (`POST /api/feedback`, `GET /api/feedback/mine`) are
+    **IMPLEMENTED and verified end-to-end** as of Phase 4. The authentication, role and verification
+    behaviour they rely on is CONFIRMED and live.
+
+    ## Dynamic questions
+
+    Answers are supported for the question types agreed by the team: `rating`, `text`,
+    `single_choice`, `multi_choice`, `boolean`, keyed by a stable `questionId`.
+
+    **However, `FeedbackForm.questions[]` is still `[Mixed]` in Dev 3's Mongoose model on every
+    branch — no question schema has been published in the repository.** The server therefore
+    normalises questions defensively and rejects `answers` (422) for a form whose questions carry no
+    stable ids. No question schema is invented in this document.
+
+    Source of truth: `docs/api-contract.md` and `CLAUDE.md`.
+
+servers:
+  - url: http://localhost:5000
+    description: Local development
+
+tags:
+  - name: Volunteer Feedback
+    description: |
+      IMPLEMENTED and verified end-to-end. Volunteer-facing feedback submission, retrieval and
+      confirmation. Every route requires an authenticated volunteer; submission additionally
+      requires an Admin-verified account.
+  - name: Reference
+    description: |
+      Read-only descriptions of existing objects needed to understand this API.
+      No endpoints are defined for these here.
+
+security:
+  - bearerAuth: []
+
+paths:
+  /api/feedback:
+    post:
+      tags: [Volunteer Feedback]
+      operationId: submitFeedback
+      summary: Submit volunteer feedback
+      description: |
+        **IMPLEMENTED (Phase 4) and verified end-to-end.**
+
+        A verified volunteer submits feedback for one activity/form. A volunteer may submit
+        **once per feedback form**; a second attempt returns `409`.
+
+        Access control (**CONFIRMED**, already live in the Phase 2 auth stack):
+
+        * `verifyJWT` — authentication required.
+        * `authorizeRoles('volunteer')` — `role` must be `volunteer`.
+        * `requireVerifiedVolunteer` — `verificationStatus` must be `verified`;
+          both `pending` and `rejected` receive `403` with distinct messages.
+
+        `respondentId` is **never accepted from the client** — the server always uses
+        `req.user._id`. Any client-supplied `respondentId`, `_id` or `createdAt` is ignored.
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FeedbackSubmissionRequest'
+            examples:
+              complete:
+                summary: All fields
+                value:
+                  formId: "68c1f0a4e2b1c3d4a5f60011"
+                  activityId: "68c1f0a4e2b1c3d4a5f60022"
+                  rating: 5
+                  whatWentWell: "Site coordination was smooth and clear."
+                  whatCouldBeImproved: "Transport pickup timing"
+                  suggestions: "A short briefing before we start would help."
+              minimal:
+                summary: Only required fields
+                value:
+                  formId: "68c1f0a4e2b1c3d4a5f60011"
+                  activityId: "68c1f0a4e2b1c3d4a5f60022"
+                  rating: 4
+      responses:
+        '201':
+          description: |
+            IMPLEMENTED. Feedback stored. This response **is** the submission confirmation.
+            `respondentId` is deliberately not echoed back — the caller is always the respondent.
+            (OPEN: whether an email/notification is additionally required.)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FeedbackSubmissionResponse'
+        '400':
+          description: |
+            Malformed request — for example a body that is not valid JSON.
+            Field-level validation failures use `422`, not `400`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: IMPLEMENTED. The `formId` does not reference an existing FeedbackForm.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                success: false
+                message: "Feedback form not found"
+        '409':
+          $ref: '#/components/responses/DuplicateSubmission'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+
+  /api/feedback/mine:
+    get:
+      tags: [Volunteer Feedback]
+      operationId: listMyFeedback
+      summary: List my own feedback submissions
+      description: |
+        **IMPLEMENTED (Phase 4) and verified end-to-end.**
+
+        Returns the submissions belonging to the authenticated volunteer. Results are always scoped
+        to `req.user._id`; a volunteer can never read another volunteer's feedback.
+
+        Intended primary use: letting the client detect "already submitted" before rendering a form.
+
+        An empty result is `200` with `count: 0` and `data: []` — **never** `404`.
+
+        **RESOLVED in Phase 4** — this endpoint does **not** require `verificationStatus ===
+        'verified'`. A `pending` or `rejected` volunteer can read their own history (and receives an
+        empty list if they have never submitted). Only `POST /api/feedback` requires a verified
+        account.
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+      parameters:
+        - name: formId
+          in: query
+          required: false
+          description: PROPOSED. Restrict results to a single feedback form.
+          schema:
+            $ref: '#/components/schemas/ObjectId'
+        - name: activityId
+          in: query
+          required: false
+          description: |
+            PROPOSED. Restrict results to a single activity.
+            OPEN — the final type of `activityId` is unresolved; see the `activityId` property
+            of `FeedbackSubmissionRequest`.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: |
+            IMPLEMENTED. The authenticated volunteer's submissions, newest first.
+            Always scoped to `req.user._id`. Empty is `count: 0` with `data: []`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FeedbackListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+
+  /api/feedback/{id}/confirmation:
+    get:
+      tags: [Volunteer Feedback]
+      operationId: getMyFeedbackConfirmation
+      summary: Confirmation details for one of my submissions
+      description: |
+        **IMPLEMENTED (Phase 5 reconciliation) and verified end-to-end.**
+
+        Returns a human-readable confirmation for a single submission: the activity title and
+        domain, the form title, the rating, and when it was submitted.
+
+        **Ownership-scoped.** A submission belonging to another volunteer returns `404`, not `403`,
+        so submission ids cannot be enumerated. `respondentId` is never returned.
+
+        Verification is not required — a volunteer who was verified at submission time can still
+        retrieve their confirmation if their status later changes.
+      security:
+        - bearerAuth: []
+        - cookieAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: The FeedbackResponse id.
+          schema:
+            $ref: '#/components/schemas/ObjectId'
+      responses:
+        '200':
+          description: IMPLEMENTED. Confirmation details for the caller's own submission.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FeedbackConfirmationResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: |
+            IMPLEMENTED. No such submission, **or** it belongs to another volunteer.
+            The two cases are deliberately indistinguishable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                success: false
+                message: "Feedback submission not found"
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+
+components:
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        CONFIRMED. `Authorization: Bearer <accessToken>`.
+        The access token is a JWT signed with `ACCESS_TOKEN_SECRET`, default lifetime 15 minutes.
+        Obtain it from `POST /api/auth/login` (documented in `docs/api-contract.md` §1.5).
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: accessToken
+      description: |
+        CONFIRMED. The same JWT delivered as an `httpOnly` cookie by `POST /api/auth/login`.
+        `verifyJWT` accepts the cookie or the bearer header. Browser clients should prefer the
+        cookie and send credentialed requests.
+
+  responses:
+    Unauthorized:
+      description: |
+        CONFIRMED. No token, or an invalid/expired token, or the user no longer exists.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            missingToken:
+              value:
+                success: false
+                message: "Authentication required"
+            invalidToken:
+              value:
+                success: false
+                message: "Invalid or expired access token"
+
+    Forbidden:
+      description: |
+        CONFIRMED. The caller is authenticated but not permitted.
+
+        Three distinct cases, distinguishable by `message`:
+        wrong role, account pending verification, or account rejected.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            wrongRole:
+              summary: Caller is not a volunteer
+              value:
+                success: false
+                message: "You are not authorized to perform this action"
+            pending:
+              summary: verificationStatus is 'pending'
+              value:
+                success: false
+                message: "Your account is waiting for Admin verification"
+            rejected:
+              summary: verificationStatus is 'rejected'
+              value:
+                success: false
+                message: "Your volunteer account has been rejected by an Admin"
+
+    DuplicateSubmission:
+      description: |
+        PROPOSED. The volunteer has already submitted feedback for this form.
+
+        Enforced by a unique compound index on `{ respondentId, feedbackFormId }`, so concurrent
+        duplicate submissions cannot both succeed.
+
+        OPEN — once-per-**form** versus once-per-**activity** is an unresolved product decision.
+        If the team chooses once-per-activity the key becomes `{ respondentId, activityId }`.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            success: false
+            message: "Feedback already submitted for this form"
+
+    ValidationFailed:
+      description: |
+        CONFIRMED convention. Field-level validation failure from `express-validator`
+        via `validateMiddleware` and `ApiError`. Note the status is `422`, not `400`.
+
+        IMPLEMENTED causes on `POST /api/feedback`:
+
+        * `rating` missing, non-integer, or outside 1-5
+        * `formId` / `activityId` missing or not a valid id
+        * a client-supplied `respondentId` or `_id` (privilege-escalation attempt)
+        * `activityId` does not match the activity of the referenced form
+        * the form's `status` is not `active`
+        * an unknown `questionId`, a duplicate answer, a missing required answer,
+          or an answer whose value does not fit its question type
+        * `answers` supplied for a form whose questions carry no stable ids
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ValidationError'
+          example:
+            success: false
+            message: "Validation failed"
+            errors:
+              - field: "rating"
+                message: "Rating must be an integer between 1 and 5"
+              - field: "formId"
+                message: "formId must be a valid ID"
+
+  schemas:
+
+    ObjectId:
+      type: string
+      pattern: '^[0-9a-fA-F]{24}$'
+      description: CONFIRMED. A 24-character hexadecimal MongoDB ObjectId.
+      example: "68c1f0a4e2b1c3d4a5f60011"
+
+    Error:
+      type: object
+      description: |
+        CONFIRMED. The project-wide error envelope, produced by the central `errorHandler`.
+        `stack` is present only when `NODE_ENV` is not `production`.
+      required: [success, message]
+      properties:
+        success:
+          type: boolean
+          enum: [false]
+        message:
+          type: string
+          example: "Feedback form not found"
+        errors:
+          type: array
+          description: Present only for validation failures. See ValidationError.
+          items:
+            $ref: '#/components/schemas/FieldError'
+        stack:
+          type: string
+          description: Development only. Never rely on this in client code.
+
+    FieldError:
+      type: object
+      description: CONFIRMED. One field-level validation failure.
+      required: [field, message]
+      properties:
+        field:
+          type: string
+          example: "rating"
+        message:
+          type: string
+          example: "Rating must be an integer between 1 and 5"
+
+    ValidationError:
+      allOf:
+        - $ref: '#/components/schemas/Error'
+        - type: object
+          required: [errors]
+          properties:
+            errors:
+              type: array
+              minItems: 1
+              items:
+                $ref: '#/components/schemas/FieldError'
+      description: CONFIRMED. A 422 error, guaranteed to carry a non-empty `errors` array.
+
+    FeedbackSubmissionRequest:
+      type: object
+      description: |
+        PROPOSED. The volunteer feedback submission body.
+
+        The four content fields are derived from the client prototype
+        `client/src/components/ssf/FeedbackDemo.jsx` (a 5-star control, the three text labels, and an
+        "Average Rating x / 5" insights panel). That component is explicitly labelled an illustrative
+        mockup, so these fields are **PROPOSED, not CONFIRMED**, until the team signs them off.
+
+        IMPLEMENTED — optional dynamic `answers` are validated against the referenced form's
+        questions. The fixed fields remain the primary path and work with no `answers` at all.
+      required: [formId, activityId, rating]
+      additionalProperties: false
+      properties:
+        formId:
+          allOf:
+            - $ref: '#/components/schemas/ObjectId'
+          description: |
+            PROPOSED as a request field; the target `FeedbackForm._id` is CONFIRMED to exist.
+            Must reference an existing FeedbackForm.
+        activityId:
+          allOf:
+            - $ref: '#/components/schemas/ObjectId'
+          description: |
+            IMPLEMENTED. Must be a valid ObjectId and must match the activity of the referenced
+            feedback form; a mismatch returns `422`.
+
+            `FeedbackResponse.activityId` is stored as `ObjectId` + `ref: 'Activity'`.
+
+            **RESOLVED:** `FeedbackForm.activityId` is now also `ObjectId` + `ref: 'Activity'`
+            (adopted from origin/main `5f6a3fb`). A defensive guard still rejects a form whose
+            `activityId` is not a valid ObjectId with `422`, for any pre-existing string data.
+        rating:
+          type: integer
+          minimum: 1
+          maximum: 5
+          description: |
+            PROPOSED. Overall experience rating.
+
+            The 1–5 range comes from the 5-star prototype control. It is **not** confirmed by any
+            backend code: `FeedbackForm.questions[]` defines no rating scale. If Dev 3 supplies a
+            question `scale` with different bounds, this range changes.
+          example: 5
+        whatWentWell:
+          type: string
+          maxLength: 2000
+          description: PROPOSED. Free text — prototype label "What went well?".
+          example: "Site coordination was smooth and clear."
+        whatCouldBeImproved:
+          type: string
+          maxLength: 2000
+          description: PROPOSED. Free text — prototype label "What could be improved?".
+          example: "Transport pickup timing"
+        suggestions:
+          type: string
+          maxLength: 2000
+          description: PROPOSED. Free text — prototype label "Your suggestions".
+          example: "A short briefing before we start would help."
+        answers:
+          type: array
+          description: |
+            IMPLEMENTED, optional. Answers to the referenced form's questions.
+
+            Validated server-side: every `questionId` must exist on the form, every question marked
+            `required` must be answered, no question may be answered twice, and each value must fit
+            its question's declared type. Any failure returns `422` with per-answer `errors[]`.
+
+            Rejected with `422` if the form's questions carry no stable ids.
+          items:
+            $ref: '#/components/schemas/AnswerInput'
+
+    QuestionType:
+      type: string
+      enum: [rating, text, single_choice, multi_choice, boolean]
+      description: |
+        IMPLEMENTED. The question types the server validates against. Agreed team contract.
+        No additional types are supported. `rating` answers use the 1-5 scale.
+
+    AnswerInput:
+      type: object
+      description: IMPLEMENTED. One submitted answer.
+      required: [questionId, value]
+      properties:
+        questionId:
+          type: string
+          description: Stable id of the question on the referenced FeedbackForm.
+          example: "q_rating"
+        value:
+          description: |
+            Shape depends on the question's type:
+            `rating` integer 1-5 · `text` string · `boolean` true/false ·
+            `single_choice` one allowed option value · `multi_choice` non-empty array of allowed
+            option values. Option values come from the question's `options[].value`.
+          oneOf:
+            - type: string
+            - type: integer
+            - type: boolean
+            - type: array
+              items:
+                type: string
+
+    StoredAnswer:
+      type: object
+      description: IMPLEMENTED. A persisted answer, stamped with the question's declared type.
+      required: [questionId, type, value]
+      properties:
+        questionId:
+          type: string
+          example: "q_rating"
+        type:
+          $ref: '#/components/schemas/QuestionType'
+        value:
+          description: See AnswerInput.value.
+          oneOf:
+            - type: string
+            - type: integer
+            - type: boolean
+            - type: array
+              items:
+                type: string
+
+    FeedbackSubmission:
+      type: object
+      description: |
+        PROPOSED. A stored feedback submission as returned to the volunteer.
+
+        `respondentId` is intentionally **not** returned — the caller is always the respondent.
+      required: [_id, formId, activityId, rating, createdAt]
+      properties:
+        _id:
+          $ref: '#/components/schemas/ObjectId'
+        formId:
+          $ref: '#/components/schemas/ObjectId'
+        activityId:
+          allOf:
+            - $ref: '#/components/schemas/ObjectId'
+          description: IMPLEMENTED. ObjectId reference to the Activity.
+        rating:
+          type: integer
+          minimum: 1
+          maximum: 5
+          example: 5
+        whatWentWell:
+          type: string
+          nullable: true
+        whatCouldBeImproved:
+          type: string
+          nullable: true
+        suggestions:
+          type: string
+          nullable: true
+        answers:
+          type: array
+          description: IMPLEMENTED. Stored answers, each stamped with its question's declared type.
+          items:
+            $ref: '#/components/schemas/StoredAnswer'
+        createdAt:
+          type: string
+          format: date-time
+          example: "2026-08-21T10:15:00.000Z"
+        updatedAt:
+          type: string
+          format: date-time
+
+    FeedbackSubmissionResponse:
+      type: object
+      description: PROPOSED. 201 envelope for a successful submission.
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        message:
+          type: string
+          example: "Feedback submitted successfully"
+        data:
+          $ref: '#/components/schemas/FeedbackSubmission'
+
+    FeedbackConfirmation:
+      type: object
+      description: |
+        IMPLEMENTED. Confirmation view of one submission. `respondentId` is deliberately absent —
+        the caller is always the respondent.
+      required: [_id, submittedAt]
+      properties:
+        _id:
+          $ref: '#/components/schemas/ObjectId'
+        activityId:
+          $ref: '#/components/schemas/ObjectId'
+        activityTitle:
+          type: string
+          example: "Tree Plantation Drive"
+        activityDomain:
+          type: string
+          enum: [women_empowerment, child_education, environment, other]
+        activityDate:
+          type: string
+          format: date-time
+        formId:
+          $ref: '#/components/schemas/ObjectId'
+        formTitle:
+          type: string
+          example: "Post-activity feedback"
+        rating:
+          type: integer
+          minimum: 1
+          maximum: 5
+        submittedAt:
+          type: string
+          format: date-time
+
+    FeedbackConfirmationResponse:
+      type: object
+      description: IMPLEMENTED. 200 envelope for the confirmation endpoint.
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        message:
+          type: string
+          example: "Feedback confirmation details"
+        data:
+          $ref: '#/components/schemas/FeedbackConfirmation'
+
+    FeedbackListResponse:
+      type: object
+      description: |
+        PROPOSED. 200 list envelope. Follows the CONFIRMED project convention that list responses
+        carry a `count` alongside `data`.
+      required: [success, count, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        count:
+          type: integer
+          minimum: 0
+          example: 1
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/FeedbackSubmission'
+
+    UserIdentity:
+      type: object
+      description: |
+        CONFIRMED — implemented and verified. The authenticated identity the server derives from the
+        JWT and attaches as `req.user`. Shown here for client understanding; it is **not** a request
+        or response body of the feedback endpoints.
+
+        `verificationStatus` is re-read from the database on every request, so an admin's
+        verify/reject decision takes effect immediately rather than at token expiry.
+
+        `isVerified` is a derived virtual (`verificationStatus === 'verified'`) and is never stored.
+      properties:
+        _id:
+          allOf:
+            - $ref: '#/components/schemas/ObjectId'
+          description: CONFIRMED. Canonical identifier. Note `req.user.id` does not exist.
+        role:
+          type: string
+          enum: [volunteer, admin, spoc]
+          description: CONFIRMED. Lowercase only.
+        verificationStatus:
+          type: string
+          enum: [pending, verified, rejected]
+          description: |
+            CONFIRMED. Single source of truth for volunteer verification. Defaults to `pending`.
+            Only an admin may transition it, and only to `verified` or `rejected`.
+
+    FeedbackFormReference:
+      type: object
+      description: |
+        CONFIRMED to exist (`server/models/FeedbackForm.js`, owned by Dev 3). Reference only — this
+        API does not create or return FeedbackForms.
+      properties:
+        _id:
+          $ref: '#/components/schemas/ObjectId'
+        activityId:
+          allOf:
+            - $ref: '#/components/schemas/ObjectId'
+          description: >-
+            IMPLEMENTED. Now an ObjectId reference to Activity
+            (adopted from origin/main).
+        title:
+          type: string
+        description:
+          type: string
+        questions:
+          type: array
+          description: |
+            **OPEN QUESTION — exact question structure must be supplied by Dev 3 before
+            dynamic-question support is implemented.**
+
+            Currently typed `[mongoose.Schema.Types.Mixed]` with only a "at least one question"
+            validator. It has no stable question IDs, no defined question types, no defined options,
+            and no defined rating representation.
+
+            No schema is invented here. Dev 3 must publish, per question: a stable `id`, a `type`
+            from an enumerated set, the `text`, `options` for choice types, `scale` (min/max/step)
+            for rating types, and whether an answer is `required`.
+            See `docs/api-contract.md` §6.
+          items: {}
+        createdBy:
+          type: string
+          description: The admin who created the form. Currently a String, not an ObjectId ref.
+        status:
+          type: string
+          enum: [active, inactive]
+          description: |
+            OPEN — whether submitting to an `inactive` form is an error is undecided.
+
+    ActivityReference:
+      type: object
+      description: |
+        CONFIRMED to exist (`server/models/Activity.js`). Reference only — this API does not create
+        or return Activities. Included because `activityId` points at it.
+      properties:
+        _id:
+          $ref: '#/components/schemas/ObjectId'
+        title:
+          type: string
+        partner:
+          allOf:
+            - $ref: '#/components/schemas/ObjectId'
+          description: CONFIRMED. ObjectId reference to a User (the corporate partner).
+        date:
+          type: string
+          format: date-time
+        location:
+          type: string
+        status:
+          type: string
+          enum: [draft, published, completed, cancelled]
+        category:
+          type: string
+          enum: [women_empowerment, child_education, environment, other]

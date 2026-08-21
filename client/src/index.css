@@ -1,0 +1,9 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+@import "@fontsource-variable/geist";
+@import "./styles/auth.css";
+
+html { scroll-behavior: smooth; }
+body { margin: 0; }
+button, input { font: inherit; }
